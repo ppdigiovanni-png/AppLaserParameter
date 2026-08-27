@@ -1,0 +1,9 @@
+streamlit
+ezdxf
+svgpathtools
+opencv-python-headless
+matplotlib
+pandas
+numpy
+fpdf2
+shapely
