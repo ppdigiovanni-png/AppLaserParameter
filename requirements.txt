@@ -7,4 +7,4 @@ pandas
 numpy
 fpdf2
 shapely
-
+pdfplumber
