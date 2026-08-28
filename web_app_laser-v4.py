@@ -498,6 +498,78 @@ def _closed_polys_from_ai_or_eps(f_bytes, filename):
     return []
 
 
+# ------------------------------------------------------------------
+# Corrector de ranuras (slots) para uniones snap-fit / slot-tab
+# ------------------------------------------------------------------
+def _tipo_contorno(poly, polys):
+    """Misma regla par/impar que usa el corrector de kerf: exterior si un
+    número PAR de otros contornos lo contienen, agujero si es impar."""
+    contenido_por = sum(1 for other in polys if other is not poly and other.contains(poly))
+    return "exterior" if contenido_por % 2 == 0 else "agujero"
+
+
+def detectar_ranuras(polys):
+    """Detecta las ranuras (agujeros) de una pieza y mide su ancho, largo
+    y ángulo real usando el rectángulo rotado mínimo que las contiene —
+    así funciona igual de bien si la ranura está rotada, no solo si está
+    perfectamente alineada a los ejes."""
+    ranuras = []
+    for i, poly in enumerate(polys):
+        if _tipo_contorno(poly, polys) != "agujero":
+            continue
+        mrr = poly.minimum_rotated_rectangle
+        coords = list(mrr.exterior.coords)[:-1]
+        if len(coords) != 4:
+            continue
+        p0, p1, p2 = np.array(coords[0]), np.array(coords[1]), np.array(coords[2])
+        lado_a = np.linalg.norm(p1 - p0)
+        lado_b = np.linalg.norm(p2 - p1)
+        largo, ancho = max(lado_a, lado_b), min(lado_a, lado_b)
+        # ángulo del lado más largo (el eje "largo" de la ranura)
+        if lado_a >= lado_b:
+            ang = math.degrees(math.atan2(p1[1] - p0[1], p1[0] - p0[0]))
+        else:
+            ang = math.degrees(math.atan2(p2[1] - p1[1], p2[0] - p1[0]))
+        centro = poly.centroid
+        ranuras.append(
+            {
+                "idx": i,
+                "poly": poly,
+                "centro": (centro.x, centro.y),
+                "angulo_deg": ang,
+                "ancho_mm": ancho,
+                "largo_mm": largo,
+            }
+        )
+    return ranuras
+
+
+def _rectangulo_desde_medidas(centro, angulo_deg, ancho, largo):
+    """Construye un rectángulo (polígono shapely) centrado en 'centro',
+    rotado 'angulo_deg', con el 'largo' medido a lo largo de ese ángulo
+    y el 'ancho' perpendicular a él."""
+    cx, cy = centro
+    ang = math.radians(angulo_deg)
+    hl, hw = largo / 2.0, ancho / 2.0
+    esquinas_local = [(-hl, -hw), (hl, -hw), (hl, hw), (-hl, hw)]
+    esquinas = []
+    for x, y in esquinas_local:
+        rx = cx + x * math.cos(ang) - y * math.sin(ang)
+        ry = cy + x * math.sin(ang) + y * math.cos(ang)
+        esquinas.append((rx, ry))
+    return ShpPolygon(esquinas)
+
+
+def aplicar_correccion_ranuras(polys, ranuras_corregidas):
+    """Devuelve la lista completa de contornos (exteriores sin tocar +
+    agujeros reemplazados por su versión corregida) lista para exportar."""
+    idx_a_nuevo = {r["idx"]: r["poly_nuevo"] for r in ranuras_corregidas}
+    resultado = []
+    for i, poly in enumerate(polys):
+        resultado.append(idx_a_nuevo.get(i, poly))
+    return resultado
+
+
 def clasificar_y_compensar(polys, kerf_mm, modo):
     """Clasifica cada contorno como 'exterior' o 'agujero' según cuántos otros
     contornos lo contienen (regla par/impar), y le aplica el offset de kerf
@@ -659,12 +731,13 @@ with col_main:
         kpi4.metric("VALOR TOTAL A COBRAR", f"${total_final:,.0f}")
         st.divider()
 
-        tab1, tab2, tab3, tab4 = st.tabs(
+        tab1, tab2, tab3, tab4, tab5 = st.tabs(
             [
                 "💰 1. Cotización",
                 "🧩 2. Optimizador de Encastre (Nesting)",
                 "📄 3. Exportar Cotización",
                 "🔧 4. Corrector de Kerf (uniones/aletas)",
+                "📐 5. Corrector de Ranuras (snap-fit)",
             ]
         )
 
@@ -913,6 +986,146 @@ with col_main:
                         file_name=f"{archivo_kerf.rsplit('.', 1)[0]}_kerf_corregido.dxf",
                         mime="application/dxf",
                     )
+
+        with tab5:
+            st.subheader("Corrector de ranuras para uniones snap-fit / slot-tab")
+            st.caption(
+                "Para bases de miniaturas, cajas con lengüetas, o cualquier pieza con "
+                "ranuras rectangulares donde encaja otra pieza a presión (snap-fit). "
+                "Si el archivo llega con la ranura mal medida (muy angosta, muy ancha, "
+                "corta o larga), aquí puedes fijar el ancho y largo EXACTOS que debe "
+                "tener, sin importar cómo vino dibujada — funciona aunque la ranura "
+                "esté rotada."
+            )
+
+            archivos_ranuras = [
+                a for a in archivos if a.name.lower().endswith((".dxf", ".svg", ".pdf", ".ai", ".eps"))
+            ]
+
+            if not archivos_ranuras:
+                st.info(
+                    "Este corrector también trabaja sobre geometría vectorial cerrada "
+                    "(DXF, SVG, PDF, AI o EPS) — los PNG/JPG no aplican aquí."
+                )
+            else:
+                archivo_ranura = st.selectbox(
+                    "Archivo a corregir", [a.name for a in archivos_ranuras], key="archivo_ranura_sel"
+                )
+                arch_obj_r = next(a for a in archivos_ranuras if a.name == archivo_ranura)
+                bytes_data_r = arch_obj_r.getvalue()
+                name_lower_r = archivo_ranura.lower()
+                if name_lower_r.endswith(".dxf"):
+                    polys_r = _closed_polys_from_dxf(bytes_data_r)
+                elif name_lower_r.endswith(".svg"):
+                    polys_r = _closed_polys_from_svg(bytes_data_r)
+                elif name_lower_r.endswith(".pdf"):
+                    polys_r = _closed_polys_from_pdf(bytes_data_r)
+                else:  # .ai / .eps
+                    polys_r = _closed_polys_from_ai_or_eps(bytes_data_r, archivo_ranura)
+
+                if not polys_r:
+                    st.warning(
+                        "No se encontraron contornos cerrados en este archivo. Revisa que "
+                        "cada pieza y cada ranura sean trazados/polilíneas cerradas."
+                    )
+                else:
+                    ranuras = detectar_ranuras(polys_r)
+                    if not ranuras:
+                        st.info(
+                            "No se detectaron ranuras (agujeros interiores) en este archivo — "
+                            "solo se encontró el contorno exterior de la(s) pieza(s)."
+                        )
+                    else:
+                        st.markdown(f"#### Se detectaron {len(ranuras)} ranura(s)")
+                        tabla_r = pd.DataFrame(
+                            [
+                                {
+                                    "Ranura": f"#{k+1}",
+                                    "Ancho actual (mm)": round(r["ancho_mm"], 2),
+                                    "Largo actual (mm)": round(r["largo_mm"], 2),
+                                    "Ancho nuevo (mm)": round(r["ancho_mm"], 2),
+                                    "Largo nuevo (mm)": round(r["largo_mm"], 2),
+                                    "Corregir": True,
+                                }
+                                for k, r in enumerate(ranuras)
+                            ]
+                        )
+                        st.caption(
+                            "Edita 'Ancho nuevo' y 'Largo nuevo' con la medida que debería tener "
+                            "cada ranura. Desmarca 'Corregir' en las que quieras dejar tal cual."
+                        )
+                        tabla_editada = st.data_editor(
+                            tabla_r,
+                            use_container_width=True,
+                            key="tabla_ranuras_editor",
+                            column_config={
+                                "Ranura": st.column_config.TextColumn(disabled=True),
+                                "Ancho actual (mm)": st.column_config.NumberColumn(disabled=True),
+                                "Largo actual (mm)": st.column_config.NumberColumn(disabled=True),
+                            },
+                        )
+
+                        with st.expander("⚡ Aplicar la misma medida a TODAS las ranuras de una vez"):
+                            col_g1, col_g2, col_g3 = st.columns([1, 1, 1])
+                            with col_g1:
+                                ancho_global = st.number_input("Ancho para todas (mm)", min_value=0.1, value=2.0, step=0.1)
+                            with col_g2:
+                                largo_global = st.number_input("Largo para todas (mm)", min_value=0.1, value=35.0, step=0.5)
+                            with col_g3:
+                                st.write("")
+                                aplicar_global = st.button("Aplicar a todas")
+                            if aplicar_global:
+                                tabla_editada["Ancho nuevo (mm)"] = ancho_global
+                                tabla_editada["Largo nuevo (mm)"] = largo_global
+
+                        ranuras_corregidas = []
+                        for k, r in enumerate(ranuras):
+                            fila = tabla_editada.iloc[k]
+                            if not bool(fila["Corregir"]):
+                                continue
+                            nuevo_ancho = float(fila["Ancho nuevo (mm)"])
+                            nuevo_largo = float(fila["Largo nuevo (mm)"])
+                            poly_nuevo = _rectangulo_desde_medidas(
+                                r["centro"], r["angulo_deg"], nuevo_ancho, nuevo_largo
+                            )
+                            ranuras_corregidas.append({"idx": r["idx"], "poly_nuevo": poly_nuevo})
+
+                        st.markdown("#### Antes vs. Después")
+                        fig_r, ax_r = plt.subplots(figsize=(8, 8))
+                        idx_corregidas = {rc["idx"] for rc in ranuras_corregidas}
+                        for i, poly in enumerate(polys_r):
+                            xo, yo = poly.exterior.xy
+                            ax_r.plot(xo, yo, "--", color="gray", linewidth=1)
+                        contornos_finales = aplicar_correccion_ranuras(polys_r, ranuras_corregidas)
+                        for i, poly in enumerate(contornos_finales):
+                            xc, yc = poly.exterior.xy
+                            color = "#2ca02c" if i in idx_corregidas else "#1f77b4"
+                            ax_r.plot(xc, yc, "-", color=color, linewidth=1.5)
+                        ax_r.set_aspect("equal")
+                        ax_r.set_title("Gris punteado = original · Verde = ranura corregida · Azul = sin cambios")
+                        st.pyplot(fig_r)
+
+                        st.markdown("#### Verificación de medidas")
+                        st.dataframe(
+                            tabla_editada[["Ranura", "Ancho actual (mm)", "Largo actual (mm)", "Ancho nuevo (mm)", "Largo nuevo (mm)"]],
+                            use_container_width=True,
+                        )
+
+                        # Exportación: reconstruye el DXF marcando como "agujero" cada contorno que efectivamente es una ranura,
+                        # y "exterior" el resto — usando la misma regla par/impar.
+                        items_export = []
+                        for i, poly in enumerate(contornos_finales):
+                            tipo = "agujero" if _tipo_contorno(polys_r[i], polys_r) == "agujero" else "exterior"
+                            items_export.append({"tipo": tipo, "corregido": poly})
+                        dxf_ranuras = exportar_dxf_corregido(items_export)
+
+                        st.download_button(
+                            "⬇️ Descargar DXF con ranuras corregidas",
+                            data=dxf_ranuras,
+                            file_name=f"{archivo_ranura.rsplit('.', 1)[0]}_ranuras_corregidas.dxf",
+                            mime="application/dxf",
+                        )
+
     else:
         st.info("Sube al menos un archivo para comenzar.")
 
