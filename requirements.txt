@@ -1,10 +1,12 @@
-streamlit
-ezdxf
-svgpathtools
-opencv-python-headless
-matplotlib
-pandas
-numpy
-fpdf2
-shapely
-pdfplumber
+streamlit>=1.43
+ezdxf==1.4.4
+svgpathtools>=1.6
+opencv-python-headless>=4.10
+matplotlib>=3.9
+pandas>=2.2
+numpy>=2.1
+fpdf2>=2.8
+shapely>=2.0
+pdfplumber>=0.11
+# Dependencia importada por matplotlib; explícita para detectar instalaciones incompletas.
+python-dateutil>=2.9
