@@ -54,45 +54,6 @@ st.set_page_config(
     layout="wide",
 )
 
-# ------------------------------------------------------------------
-# CSS: sidebar a la derecha + más ancha
-# ------------------------------------------------------------------
-# Nota técnica: Streamlit no tiene una opción oficial para poner la barra
-# lateral a la derecha, así que esto se logra "engañando" al CSS interno
-# (data-testid) del framework. Si en el futuro Streamlit cambia su HTML
-# interno, este bloque puede dejar de verse bien — en ese caso, basta con
-# borrar este <style> completo para volver a la barra lateral normal (izquierda).
-st.markdown(
-    """
-    <style>
-    section[data-testid="stSidebar"] {
-        position: fixed;
-        top: 0;
-        right: 0;
-        left: auto !important;
-        height: 100vh;
-        width: 430px !important;
-    }
-    section[data-testid="stSidebar"] > div {
-        width: 430px !important;
-    }
-    div[data-testid="stAppViewContainer"] > div:first-child {
-        margin-right: 430px;
-        margin-left: 0 !important;
-    }
-    div[data-testid="collapsedControl"] {
-        left: auto !important;
-        right: 0.5rem !important;
-    }
-    @media (max-width: 900px) {
-        section[data-testid="stSidebar"] { width: 90vw !important; }
-        section[data-testid="stSidebar"] > div { width: 90vw !important; }
-        div[data-testid="stAppViewContainer"] > div:first-child { margin-right: 0; }
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
 
 # ------------------------------------------------------------------
 # Tarifas base (editables en la sidebar con st.data_editor)
@@ -110,9 +71,16 @@ if "rates_df" not in st.session_state:
     st.session_state.rates_df = DEFAULT_RATES.copy()
 
 # ------------------------------------------------------------------
-# Sidebar — configuración del taller
+# Panel de configuración — a la derecha, con columnas nativas (responsivo)
 # ------------------------------------------------------------------
-with st.sidebar:
+# A diferencia de st.sidebar (que Streamlit fija siempre a la izquierda y
+# que en pantallas angostas cambia de comportamiento por su cuenta), usar
+# columnas nativas es 100% soportado y responsivo: en pantalla ancha el
+# panel queda a la derecha; en el celular, Streamlit apila las columnas
+# automáticamente (el panel pasa a verse debajo del contenido principal).
+col_main, col_config = st.columns([2.4, 1], gap="large")
+
+with col_config:
     st.header("⚙️ Configuración del Taller")
     st.caption("Cada sección es desplegable — ábrelas de a una, en el orden que prefieras.")
 
@@ -519,350 +487,352 @@ def exportar_dxf_corregido(resultado):
     return buf.getvalue().encode("utf-8")
 
 
-# ------------------------------------------------------------------
-# Encabezado centrado (menubar superior con la marca)
-# ------------------------------------------------------------------
-st.markdown(
-    f"""
-    <div style="text-align:center; padding-top: 0.5rem;">
-        <span style="font-size: 2.4rem;">⚡</span>
-        <h1 style="display:inline; margin-left: 0.4rem;">Remeciendo</h1>
-        <p style="color: #888; margin-top: 0.2rem;">Cotizador y Nesting Láser · Estudio &amp; Taller Laser</p>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-st.write(
-    "Sube uno o varios archivos (DXF, SVG, PDF, AI, EPS, PNG, JPG) para cotizar y optimizar el uso de material."
-)
-
-archivos = st.file_uploader(
-    "Carga tus diseños",
-    accept_multiple_files=True,
-    type=["dxf", "svg", "pdf", "ai", "eps", "png", "jpg", "jpeg"],
-)
-
-if archivos:
-    st.subheader("Cantidad y tamaño real de cada diseño")
-    st.caption(
-        "Para PNG/JPG indica el ancho real en mm de la pieza terminada "
-        "(los píxeles no tienen escala propia); para DXF/SVG/PDF/AI se detecta solo "
-        "(EPS necesita Ghostscript en el servidor; si no está, se estima)."
+with col_main:
+    # ------------------------------------------------------------------
+    # Encabezado centrado (menubar superior con la marca)
+    # ------------------------------------------------------------------
+    st.markdown(
+        f"""
+        <div style="text-align:center; padding-top: 0.5rem;">
+            <span style="font-size: 2.4rem;">⚡</span>
+            <h1 style="display:inline; margin-left: 0.4rem;">Remeciendo</h1>
+            <p style="color: #888; margin-top: 0.2rem;">Cotizador y Nesting Láser · Estudio &amp; Taller Laser</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.write(
+        "Sube uno o varios archivos (DXF, SVG, PDF, AI, EPS, PNG, JPG) para cotizar y optimizar el uso de material."
     )
 
-    piezas_meta = []
-    for arch in archivos:
-        name_lower = arch.name.lower()
-        col1, col2 = st.columns([2, 1])
-        with col1:
-            cantidad = st.number_input(f"Cantidad — {arch.name}", min_value=1, value=1, step=1, key=f"qty_{arch.name}")
-        with col2:
-            ancho_real = None
-            if name_lower.endswith((".png", ".jpg", ".jpeg")):
-                ancho_real = st.number_input(
-                    f"Ancho real (mm) — {arch.name}", min_value=1.0, value=100.0, step=1.0, key=f"w_{arch.name}"
-                )
-        piezas_meta.append({"archivo": arch, "cantidad": int(cantidad), "ancho_real": ancho_real})
-
-    piezas = []
-    corte_total = 0.0
-    area_total_cm2 = 0.0
-
-    for meta in piezas_meta:
-        arch = meta["archivo"]
-        bytes_data = arch.getvalue()
-        name = arch.name.lower()
-        if name.endswith(".dxf"):
-            c, w, h = parse_dxf(bytes_data)
-        elif name.endswith(".svg"):
-            c, w, h = parse_svg(bytes_data)
-        elif name.endswith(".pdf"):
-            c, w, h = parse_pdf(bytes_data)
-        elif name.endswith(".ai"):
-            c, w, h = parse_ai(bytes_data)
-        elif name.endswith(".eps"):
-            c, w, h = parse_eps(bytes_data)
-        else:
-            c, w, h = parse_raster(bytes_data, meta["ancho_real"])
-
-        for i in range(meta["cantidad"]):
-            corte_total += c
-            area_total_cm2 += (w * h) / 100.0
-            piezas.append({"nombre": f"{arch.name}#{i+1}", "w": w, "h": h, "corte": c})
-
-    tab1, tab2, tab3, tab4 = st.tabs(
-        [
-            "💰 1. Cotización",
-            "🧩 2. Optimizador de Encastre (Nesting)",
-            "📄 3. Exportar Cotización",
-            "🔧 4. Corrector de Kerf (uniones/aletas)",
-        ]
+    archivos = st.file_uploader(
+        "Carga tus diseños",
+        accept_multiple_files=True,
+        type=["dxf", "svg", "pdf", "ai", "eps", "png", "jpg", "jpeg"],
     )
 
-    # ---- Nesting (se calcula primero porque la cotización depende del N° de planchas) ----
-    placed_by_sheet, sin_ubicar = nest_pieces(piezas, plancha_w, plancha_h, margen_pieza, permitir_rotar)
-    n_planchas = len(placed_by_sheet)
-    area_planchas_cm2 = n_planchas * (plancha_w * plancha_h) / 100.0
-    area_piezas_cm2 = area_total_cm2
-    utilizacion_pct = (area_piezas_cm2 / area_planchas_cm2 * 100.0) if area_planchas_cm2 > 0 else 0.0
-
-    with tab1:
-        st.subheader("Resumen de costos del lote")
-
-        tiempo_maq_min = (corte_total / mat["vel"]) / 60.0
-        # Costo de material: sobre planchas REALMENTE necesarias (con merma), no sobre el área de piezas.
-        costo_mat = n_planchas * (plancha_w * plancha_h / 10000.0) * mat["mat_m2"] * (1 + merma_pct)
-        costo_maq = tiempo_maq_min * costo_minuto
-        costo_desgaste = corte_total * mat["corte_mm"]
-        costo_neto = costo_mat + costo_maq + costo_desgaste + costo_alistamiento
-        precio_con_utilidad = costo_neto * (1 + margen_utilidad)
-        descuento_monto = precio_con_utilidad * descuento_pct
-        subtotal = precio_con_utilidad - descuento_monto
-        iva_monto = subtotal * 0.19 if aplicar_iva else 0.0
-        total_final = subtotal + iva_monto
-
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Largo de corte total", f"{corte_total:,.0f} mm")
-        col2.metric("Tiempo de máquina", f"{tiempo_maq_min:.1f} min")
-        col3.metric("Planchas necesarias", f"{n_planchas}")
-        col4.metric("VALOR TOTAL A COBRAR", f"${total_final:,.0f}")
-
-        if sin_ubicar:
-            st.error(
-                f"⚠️ {len(sin_ubicar)} pieza(s) no caben en el ancho de la plancha configurada "
-                f"({plancha_w}mm) ni rotadas. Revisa las dimensiones o aumenta el tamaño de plancha."
-            )
-
-        st.table(
-            pd.DataFrame(
-                {
-                    "Ítem": [
-                        f"Material ({n_planchas} plancha(s), incl. {merma_pct*100:.0f}% merma)",
-                        "Tiempo de corte/grabado (máquina)",
-                        "Desgaste láser (según largo de corte)",
-                        "Alistamiento máquina (setup)",
-                        f"Utilidad ({margen_utilidad*100:.0f}%)",
-                        f"Descuento (-{descuento_pct*100:.0f}%)",
-                        "IVA (19%)" if aplicar_iva else "IVA (no aplica)",
-                    ],
-                    "Costo ($)": [
-                        costo_mat,
-                        costo_maq,
-                        costo_desgaste,
-                        costo_alistamiento,
-                        precio_con_utilidad - costo_neto,
-                        -descuento_monto,
-                        iva_monto,
-                    ],
-                }
-            )
-        )
-        st.info(f"Utilización estimada de plancha: **{utilizacion_pct:.1f}%**")
-
-    with tab2:
-        st.subheader("Distribución automática de piezas por plancha")
+    if archivos:
+        st.subheader("Cantidad y tamaño real de cada diseño")
         st.caption(
-            f"{n_planchas} plancha(s) de {plancha_w}x{plancha_h}mm · "
-            f"Rotación 90° {'activada' if permitir_rotar else 'desactivada'} · "
-            f"Utilización global: {utilizacion_pct:.1f}%"
+            "Para PNG/JPG indica el ancho real en mm de la pieza terminada "
+            "(los píxeles no tienen escala propia); para DXF/SVG/PDF/AI se detecta solo "
+            "(EPS necesita Ghostscript en el servidor; si no está, se estima)."
         )
 
-        for idx, pzs in enumerate(placed_by_sheet):
-            fig, ax = plt.subplots(figsize=(10, 7.5 * plancha_h / plancha_w if plancha_w else 5))
-            ax.add_patch(
-                patches.Rectangle((0, 0), plancha_w, plancha_h, fill=False, edgecolor="black", lw=2)
-            )
-            for p in pzs:
-                ax.add_patch(
-                    patches.Rectangle(
-                        (p["x"], p["y"]), p["w"], p["h"],
-                        fill=True, facecolor="#87CEFA", edgecolor="#4682B4", alpha=0.85, lw=1,
+        piezas_meta = []
+        for arch in archivos:
+            name_lower = arch.name.lower()
+            col1, col2 = st.columns([2, 1])
+            with col1:
+                cantidad = st.number_input(f"Cantidad — {arch.name}", min_value=1, value=1, step=1, key=f"qty_{arch.name}")
+            with col2:
+                ancho_real = None
+                if name_lower.endswith((".png", ".jpg", ".jpeg")):
+                    ancho_real = st.number_input(
+                        f"Ancho real (mm) — {arch.name}", min_value=1.0, value=100.0, step=1.0, key=f"w_{arch.name}"
                     )
-                )
-                ax.text(
-                    p["x"] + p["w"] / 2, p["y"] + p["h"] / 2, p["nombre"][:10],
-                    ha="center", va="center", fontsize=6,
-                )
-            ax.set_xlim(-20, plancha_w + 20)
-            ax.set_ylim(-20, plancha_h + 20)
-            ax.set_aspect("equal")
-            ax.set_title(f"Plancha {idx + 1} de {n_planchas} — {len(pzs)} pieza(s)")
-            st.pyplot(fig)
+            piezas_meta.append({"archivo": arch, "cantidad": int(cantidad), "ancho_real": ancho_real})
 
-        if sin_ubicar:
-            st.warning(
-                "Piezas que no se pudieron ubicar (demasiado grandes para la plancha): "
-                + ", ".join(p["nombre"] for p in sin_ubicar)
-            )
-        else:
-            st.success("Todas las piezas fueron ubicadas en el número de planchas indicado arriba.")
+        piezas = []
+        corte_total = 0.0
+        area_total_cm2 = 0.0
 
-    with tab3:
-        st.subheader("Generar cotización en PDF")
-        if not PDF_OK:
-            st.error("Falta instalar la librería `fpdf2` (`pip install fpdf2`) para exportar en PDF.")
-        else:
-            if st.button("Generar PDF de la cotización"):
-                pdf = FPDF()
-                pdf.add_page()
-                pdf.set_font("Helvetica", "B", 16)
-                pdf.cell(0, 10, "Remeciendo Estudio & Taller Laser", ln=True)
-                pdf.set_font("Helvetica", "", 10)
-                pdf.cell(0, 6, "Pedro Aguirre Cerda, Santiago, Chile", ln=True)
-                pdf.ln(4)
-                pdf.set_font("Helvetica", "B", 12)
-                pdf.cell(0, 8, f"Cotización N° {n_cotizacion}", ln=True)
-                pdf.set_font("Helvetica", "", 10)
-                pdf.cell(0, 6, f"Fecha: {date.today().strftime('%d-%m-%Y')}", ln=True)
-                if cliente:
-                    pdf.cell(0, 6, f"Cliente: {cliente}", ln=True)
-                pdf.ln(4)
+        for meta in piezas_meta:
+            arch = meta["archivo"]
+            bytes_data = arch.getvalue()
+            name = arch.name.lower()
+            if name.endswith(".dxf"):
+                c, w, h = parse_dxf(bytes_data)
+            elif name.endswith(".svg"):
+                c, w, h = parse_svg(bytes_data)
+            elif name.endswith(".pdf"):
+                c, w, h = parse_pdf(bytes_data)
+            elif name.endswith(".ai"):
+                c, w, h = parse_ai(bytes_data)
+            elif name.endswith(".eps"):
+                c, w, h = parse_eps(bytes_data)
+            else:
+                c, w, h = parse_raster(bytes_data, meta["ancho_real"])
 
-                pdf.set_font("Helvetica", "B", 10)
-                pdf.cell(90, 8, "Ítem", border=1)
-                pdf.cell(0, 8, "Monto ($)", border=1, ln=True)
-                pdf.set_font("Helvetica", "", 10)
-                filas = [
-                    (f"Material ({n_planchas} plancha(s) de {material_sel})", costo_mat),
-                    ("Tiempo de máquina", costo_maq),
-                    ("Desgaste láser", costo_desgaste),
-                    ("Alistamiento", costo_alistamiento),
-                    (f"Utilidad ({margen_utilidad*100:.0f}%)", precio_con_utilidad - costo_neto),
-                ]
-                if descuento_pct > 0:
-                    filas.append((f"Descuento ({descuento_pct*100:.0f}%)", -descuento_monto))
-                if aplicar_iva:
-                    filas.append(("IVA (19%)", iva_monto))
-                for label, val in filas:
-                    pdf.cell(90, 8, label, border=1)
-                    pdf.cell(0, 8, f"{val:,.0f}", border=1, ln=True)
+            for i in range(meta["cantidad"]):
+                corte_total += c
+                area_total_cm2 += (w * h) / 100.0
+                piezas.append({"nombre": f"{arch.name}#{i+1}", "w": w, "h": h, "corte": c})
 
-                pdf.set_font("Helvetica", "B", 11)
-                pdf.cell(90, 9, "TOTAL", border=1)
-                pdf.cell(0, 9, f"${total_final:,.0f}", border=1, ln=True)
-
-                pdf_bytes = bytes(pdf.output(dest="S"))
-                st.download_button(
-                    "⬇️ Descargar PDF",
-                    data=pdf_bytes,
-                    file_name=f"Cotizacion_{n_cotizacion}.pdf",
-                    mime="application/pdf",
-                )
-
-    with tab4:
-        st.subheader("Corrector de kerf para uniones tipo caja (aletas/dientes)")
-        st.caption(
-            "El láser no corta con espesor cero: se lleva un ancho de material (kerf) centrado "
-            "en la línea de vector. Eso hace que el contorno EXTERIOR de una pieza salga más "
-            "angosto de lo dibujado, y que los AGUJEROS/ranuras salgan más anchos de lo dibujado. "
-            "En una caja de aletas eso se traduce en dientes sueltos o ranuras apretadas. "
-            "Esta herramienta agranda el contorno exterior en kerf/2 y achica los agujeros en "
-            "kerf/2 para que la pieza cortada quede en la medida que diseñaste."
+        tab1, tab2, tab3, tab4 = st.tabs(
+            [
+                "💰 1. Cotización",
+                "🧩 2. Optimizador de Encastre (Nesting)",
+                "📄 3. Exportar Cotización",
+                "🔧 4. Corrector de Kerf (uniones/aletas)",
+            ]
         )
 
-        archivos_vectoriales = [a for a in archivos if a.name.lower().endswith((".dxf", ".svg"))]
+        # ---- Nesting (se calcula primero porque la cotización depende del N° de planchas) ----
+        placed_by_sheet, sin_ubicar = nest_pieces(piezas, plancha_w, plancha_h, margen_pieza, permitir_rotar)
+        n_planchas = len(placed_by_sheet)
+        area_planchas_cm2 = n_planchas * (plancha_w * plancha_h) / 100.0
+        area_piezas_cm2 = area_total_cm2
+        utilizacion_pct = (area_piezas_cm2 / area_planchas_cm2 * 100.0) if area_planchas_cm2 > 0 else 0.0
 
-        if not archivos_vectoriales:
-            st.info(
-                "El corrector de kerf trabaja sobre geometría vectorial cerrada (DXF o SVG). "
-                "Los PNG/JPG no traen esa información, así que no aplican aquí."
+        with tab1:
+            st.subheader("Resumen de costos del lote")
+
+            tiempo_maq_min = (corte_total / mat["vel"]) / 60.0
+            # Costo de material: sobre planchas REALMENTE necesarias (con merma), no sobre el área de piezas.
+            costo_mat = n_planchas * (plancha_w * plancha_h / 10000.0) * mat["mat_m2"] * (1 + merma_pct)
+            costo_maq = tiempo_maq_min * costo_minuto
+            costo_desgaste = corte_total * mat["corte_mm"]
+            costo_neto = costo_mat + costo_maq + costo_desgaste + costo_alistamiento
+            precio_con_utilidad = costo_neto * (1 + margen_utilidad)
+            descuento_monto = precio_con_utilidad * descuento_pct
+            subtotal = precio_con_utilidad - descuento_monto
+            iva_monto = subtotal * 0.19 if aplicar_iva else 0.0
+            total_final = subtotal + iva_monto
+
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Largo de corte total", f"{corte_total:,.0f} mm")
+            col2.metric("Tiempo de máquina", f"{tiempo_maq_min:.1f} min")
+            col3.metric("Planchas necesarias", f"{n_planchas}")
+            col4.metric("VALOR TOTAL A COBRAR", f"${total_final:,.0f}")
+
+            if sin_ubicar:
+                st.error(
+                    f"⚠️ {len(sin_ubicar)} pieza(s) no caben en el ancho de la plancha configurada "
+                    f"({plancha_w}mm) ni rotadas. Revisa las dimensiones o aumenta el tamaño de plancha."
+                )
+
+            st.table(
+                pd.DataFrame(
+                    {
+                        "Ítem": [
+                            f"Material ({n_planchas} plancha(s), incl. {merma_pct*100:.0f}% merma)",
+                            "Tiempo de corte/grabado (máquina)",
+                            "Desgaste láser (según largo de corte)",
+                            "Alistamiento máquina (setup)",
+                            f"Utilidad ({margen_utilidad*100:.0f}%)",
+                            f"Descuento (-{descuento_pct*100:.0f}%)",
+                            "IVA (19%)" if aplicar_iva else "IVA (no aplica)",
+                        ],
+                        "Costo ($)": [
+                            costo_mat,
+                            costo_maq,
+                            costo_desgaste,
+                            costo_alistamiento,
+                            precio_con_utilidad - costo_neto,
+                            -descuento_monto,
+                            iva_monto,
+                        ],
+                    }
+                )
             )
-        else:
-            col_a, col_b, col_c = st.columns(3)
-            with col_a:
-                archivo_kerf = st.selectbox(
-                    "Archivo a corregir", [a.name for a in archivos_vectoriales]
-                )
-            with col_b:
-                kerf_mm = st.number_input(
-                    "Ancho de kerf (mm)", min_value=0.0, max_value=2.0, value=0.15, step=0.01,
-                    help="Mídelo cortando un cuadrado de 50x50mm y viendo cuánto le falta al medirlo con pie de metro. "
-                         "Típico: 0.10-0.15mm en MDF 3mm, 0.15-0.25mm en acrílico.",
-                )
-            with col_c:
-                modo_kerf = st.selectbox(
-                    "Modo de corrección",
-                    ["completo", "solo_agujeros", "solo_exterior"],
-                    format_func=lambda x: {
-                        "completo": "Completo (exterior + agujeros)",
-                        "solo_agujeros": "Solo ranuras/agujeros (no tocar tamaño exterior)",
-                        "solo_exterior": "Solo contorno exterior",
-                    }[x],
-                )
+            st.info(f"Utilización estimada de plancha: **{utilizacion_pct:.1f}%**")
 
-            arch_obj = next(a for a in archivos_vectoriales if a.name == archivo_kerf)
-            bytes_data = arch_obj.getvalue()
-            if archivo_kerf.lower().endswith(".dxf"):
-                polys_originales = _closed_polys_from_dxf(bytes_data)
-            else:
-                polys_originales = _closed_polys_from_svg(bytes_data)
+        with tab2:
+            st.subheader("Distribución automática de piezas por plancha")
+            st.caption(
+                f"{n_planchas} plancha(s) de {plancha_w}x{plancha_h}mm · "
+                f"Rotación 90° {'activada' if permitir_rotar else 'desactivada'} · "
+                f"Utilización global: {utilizacion_pct:.1f}%"
+            )
 
-            if not polys_originales:
-                st.warning(
-                    "No se encontraron contornos CERRADOS en este archivo (líneas sueltas, "
-                    "polilíneas abiertas o splines no detectadas). Para que el corrector "
-                    "funcione, cada pieza y cada agujero debe ser una polilínea/trazado cerrado."
+            for idx, pzs in enumerate(placed_by_sheet):
+                fig, ax = plt.subplots(figsize=(10, 7.5 * plancha_h / plancha_w if plancha_w else 5))
+                ax.add_patch(
+                    patches.Rectangle((0, 0), plancha_w, plancha_h, fill=False, edgecolor="black", lw=2)
                 )
-            else:
-                resultado = clasificar_y_compensar(polys_originales, kerf_mm, modo_kerf)
-
-                st.markdown("#### Antes vs. Después")
-                fig, ax = plt.subplots(figsize=(8, 8))
-                for item in resultado:
-                    xo, yo = item["original"].exterior.xy
-                    ax.plot(xo, yo, "--", color="gray", linewidth=1, label="Original" if item is resultado[0] else None)
-                    xc, yc = item["corregido"].exterior.xy
-                    color = "#1f77b4" if item["tipo"] == "exterior" else "#d62728"
-                    ax.plot(xc, yc, "-", color=color, linewidth=1.5)
+                for p in pzs:
+                    ax.add_patch(
+                        patches.Rectangle(
+                            (p["x"], p["y"]), p["w"], p["h"],
+                            fill=True, facecolor="#87CEFA", edgecolor="#4682B4", alpha=0.85, lw=1,
+                        )
+                    )
+                    ax.text(
+                        p["x"] + p["w"] / 2, p["y"] + p["h"] / 2, p["nombre"][:10],
+                        ha="center", va="center", fontsize=6,
+                    )
+                ax.set_xlim(-20, plancha_w + 20)
+                ax.set_ylim(-20, plancha_h + 20)
                 ax.set_aspect("equal")
-                ax.set_title("Gris punteado = original · Azul = exterior corregido · Rojo = agujero corregido")
-                ax.legend(loc="upper right", fontsize=8)
+                ax.set_title(f"Plancha {idx + 1} de {n_planchas} — {len(pzs)} pieza(s)")
                 st.pyplot(fig)
 
-                st.markdown("#### Verificación de medidas por contorno")
-                tabla = pd.DataFrame(
-                    [
-                        {
-                            "Tipo": it["tipo"],
-                            "Ancho antes (mm)": round(it["ancho_antes"], 2),
-                            "Ancho después (mm)": round(it["ancho_despues"], 2),
-                            "Alto antes (mm)": round(it["alto_antes"], 2),
-                            "Alto después (mm)": round(it["alto_despues"], 2),
-                        }
-                        for it in resultado
+            if sin_ubicar:
+                st.warning(
+                    "Piezas que no se pudieron ubicar (demasiado grandes para la plancha): "
+                    + ", ".join(p["nombre"] for p in sin_ubicar)
+                )
+            else:
+                st.success("Todas las piezas fueron ubicadas en el número de planchas indicado arriba.")
+
+        with tab3:
+            st.subheader("Generar cotización en PDF")
+            if not PDF_OK:
+                st.error("Falta instalar la librería `fpdf2` (`pip install fpdf2`) para exportar en PDF.")
+            else:
+                if st.button("Generar PDF de la cotización"):
+                    pdf = FPDF()
+                    pdf.add_page()
+                    pdf.set_font("Helvetica", "B", 16)
+                    pdf.cell(0, 10, "Remeciendo Estudio & Taller Laser", ln=True)
+                    pdf.set_font("Helvetica", "", 10)
+                    pdf.cell(0, 6, "Pedro Aguirre Cerda, Santiago, Chile", ln=True)
+                    pdf.ln(4)
+                    pdf.set_font("Helvetica", "B", 12)
+                    pdf.cell(0, 8, f"Cotización N° {n_cotizacion}", ln=True)
+                    pdf.set_font("Helvetica", "", 10)
+                    pdf.cell(0, 6, f"Fecha: {date.today().strftime('%d-%m-%Y')}", ln=True)
+                    if cliente:
+                        pdf.cell(0, 6, f"Cliente: {cliente}", ln=True)
+                    pdf.ln(4)
+
+                    pdf.set_font("Helvetica", "B", 10)
+                    pdf.cell(90, 8, "Ítem", border=1)
+                    pdf.cell(0, 8, "Monto ($)", border=1, ln=True)
+                    pdf.set_font("Helvetica", "", 10)
+                    filas = [
+                        (f"Material ({n_planchas} plancha(s) de {material_sel})", costo_mat),
+                        ("Tiempo de máquina", costo_maq),
+                        ("Desgaste láser", costo_desgaste),
+                        ("Alistamiento", costo_alistamiento),
+                        (f"Utilidad ({margen_utilidad*100:.0f}%)", precio_con_utilidad - costo_neto),
                     ]
-                )
-                st.dataframe(tabla, use_container_width=True)
+                    if descuento_pct > 0:
+                        filas.append((f"Descuento ({descuento_pct*100:.0f}%)", -descuento_monto))
+                    if aplicar_iva:
+                        filas.append(("IVA (19%)", iva_monto))
+                    for label, val in filas:
+                        pdf.cell(90, 8, label, border=1)
+                        pdf.cell(0, 8, f"{val:,.0f}", border=1, ln=True)
 
-                st.markdown("#### Ratificar contra una medida esperada")
-                st.caption(
-                    "Si sabes que, por ejemplo, un diente/ranura debe medir exactamente cierto "
-                    "ancho, ingrésalo aquí y compáralo con la fila correspondiente de la tabla de arriba."
-                )
-                col_x, col_y = st.columns(2)
-                with col_x:
-                    medida_esperada = st.number_input("Medida esperada (mm)", min_value=0.0, value=10.0, step=0.1)
-                with col_y:
-                    fila_idx = st.number_input(
-                        "N° de fila de la tabla a comparar (0 = primera)",
-                        min_value=0, max_value=len(resultado) - 1, value=0, step=1,
+                    pdf.set_font("Helvetica", "B", 11)
+                    pdf.cell(90, 9, "TOTAL", border=1)
+                    pdf.cell(0, 9, f"${total_final:,.0f}", border=1, ln=True)
+
+                    pdf_bytes = bytes(pdf.output(dest="S"))
+                    st.download_button(
+                        "⬇️ Descargar PDF",
+                        data=pdf_bytes,
+                        file_name=f"Cotizacion_{n_cotizacion}.pdf",
+                        mime="application/pdf",
                     )
-                medida_real = resultado[int(fila_idx)]["ancho_despues"]
-                diff = medida_real - medida_esperada
-                if abs(diff) < 0.05:
-                    st.success(f"✅ Coincide: {medida_real:.2f}mm vs {medida_esperada:.2f}mm esperados (dif. {diff:+.2f}mm).")
-                else:
-                    st.warning(f"⚠️ Diferencia de {diff:+.2f}mm entre lo corregido ({medida_real:.2f}mm) y lo esperado ({medida_esperada:.2f}mm). Ajusta el valor de kerf e inténtalo de nuevo.")
 
-                dxf_corregido = exportar_dxf_corregido(resultado)
-                st.download_button(
-                    "⬇️ Descargar DXF corregido (listo para cortar)",
-                    data=dxf_corregido,
-                    file_name=f"{archivo_kerf.rsplit('.', 1)[0]}_kerf_corregido.dxf",
-                    mime="application/dxf",
+        with tab4:
+            st.subheader("Corrector de kerf para uniones tipo caja (aletas/dientes)")
+            st.caption(
+                "El láser no corta con espesor cero: se lleva un ancho de material (kerf) centrado "
+                "en la línea de vector. Eso hace que el contorno EXTERIOR de una pieza salga más "
+                "angosto de lo dibujado, y que los AGUJEROS/ranuras salgan más anchos de lo dibujado. "
+                "En una caja de aletas eso se traduce en dientes sueltos o ranuras apretadas. "
+                "Esta herramienta agranda el contorno exterior en kerf/2 y achica los agujeros en "
+                "kerf/2 para que la pieza cortada quede en la medida que diseñaste."
+            )
+
+            archivos_vectoriales = [a for a in archivos if a.name.lower().endswith((".dxf", ".svg"))]
+
+            if not archivos_vectoriales:
+                st.info(
+                    "El corrector de kerf trabaja sobre geometría vectorial cerrada (DXF o SVG). "
+                    "Los PNG/JPG no traen esa información, así que no aplican aquí."
                 )
-else:
-    st.info("Sube al menos un archivo para comenzar.")
+            else:
+                col_a, col_b, col_c = st.columns(3)
+                with col_a:
+                    archivo_kerf = st.selectbox(
+                        "Archivo a corregir", [a.name for a in archivos_vectoriales]
+                    )
+                with col_b:
+                    kerf_mm = st.number_input(
+                        "Ancho de kerf (mm)", min_value=0.0, max_value=2.0, value=0.15, step=0.01,
+                        help="Mídelo cortando un cuadrado de 50x50mm y viendo cuánto le falta al medirlo con pie de metro. "
+                             "Típico: 0.10-0.15mm en MDF 3mm, 0.15-0.25mm en acrílico.",
+                    )
+                with col_c:
+                    modo_kerf = st.selectbox(
+                        "Modo de corrección",
+                        ["completo", "solo_agujeros", "solo_exterior"],
+                        format_func=lambda x: {
+                            "completo": "Completo (exterior + agujeros)",
+                            "solo_agujeros": "Solo ranuras/agujeros (no tocar tamaño exterior)",
+                            "solo_exterior": "Solo contorno exterior",
+                        }[x],
+                    )
+
+                arch_obj = next(a for a in archivos_vectoriales if a.name == archivo_kerf)
+                bytes_data = arch_obj.getvalue()
+                if archivo_kerf.lower().endswith(".dxf"):
+                    polys_originales = _closed_polys_from_dxf(bytes_data)
+                else:
+                    polys_originales = _closed_polys_from_svg(bytes_data)
+
+                if not polys_originales:
+                    st.warning(
+                        "No se encontraron contornos CERRADOS en este archivo (líneas sueltas, "
+                        "polilíneas abiertas o splines no detectadas). Para que el corrector "
+                        "funcione, cada pieza y cada agujero debe ser una polilínea/trazado cerrado."
+                    )
+                else:
+                    resultado = clasificar_y_compensar(polys_originales, kerf_mm, modo_kerf)
+
+                    st.markdown("#### Antes vs. Después")
+                    fig, ax = plt.subplots(figsize=(8, 8))
+                    for item in resultado:
+                        xo, yo = item["original"].exterior.xy
+                        ax.plot(xo, yo, "--", color="gray", linewidth=1, label="Original" if item is resultado[0] else None)
+                        xc, yc = item["corregido"].exterior.xy
+                        color = "#1f77b4" if item["tipo"] == "exterior" else "#d62728"
+                        ax.plot(xc, yc, "-", color=color, linewidth=1.5)
+                    ax.set_aspect("equal")
+                    ax.set_title("Gris punteado = original · Azul = exterior corregido · Rojo = agujero corregido")
+                    ax.legend(loc="upper right", fontsize=8)
+                    st.pyplot(fig)
+
+                    st.markdown("#### Verificación de medidas por contorno")
+                    tabla = pd.DataFrame(
+                        [
+                            {
+                                "Tipo": it["tipo"],
+                                "Ancho antes (mm)": round(it["ancho_antes"], 2),
+                                "Ancho después (mm)": round(it["ancho_despues"], 2),
+                                "Alto antes (mm)": round(it["alto_antes"], 2),
+                                "Alto después (mm)": round(it["alto_despues"], 2),
+                            }
+                            for it in resultado
+                        ]
+                    )
+                    st.dataframe(tabla, use_container_width=True)
+
+                    st.markdown("#### Ratificar contra una medida esperada")
+                    st.caption(
+                        "Si sabes que, por ejemplo, un diente/ranura debe medir exactamente cierto "
+                        "ancho, ingrésalo aquí y compáralo con la fila correspondiente de la tabla de arriba."
+                    )
+                    col_x, col_y = st.columns(2)
+                    with col_x:
+                        medida_esperada = st.number_input("Medida esperada (mm)", min_value=0.0, value=10.0, step=0.1)
+                    with col_y:
+                        fila_idx = st.number_input(
+                            "N° de fila de la tabla a comparar (0 = primera)",
+                            min_value=0, max_value=len(resultado) - 1, value=0, step=1,
+                        )
+                    medida_real = resultado[int(fila_idx)]["ancho_despues"]
+                    diff = medida_real - medida_esperada
+                    if abs(diff) < 0.05:
+                        st.success(f"✅ Coincide: {medida_real:.2f}mm vs {medida_esperada:.2f}mm esperados (dif. {diff:+.2f}mm).")
+                    else:
+                        st.warning(f"⚠️ Diferencia de {diff:+.2f}mm entre lo corregido ({medida_real:.2f}mm) y lo esperado ({medida_esperada:.2f}mm). Ajusta el valor de kerf e inténtalo de nuevo.")
+
+                    dxf_corregido = exportar_dxf_corregido(resultado)
+                    st.download_button(
+                        "⬇️ Descargar DXF corregido (listo para cortar)",
+                        data=dxf_corregido,
+                        file_name=f"{archivo_kerf.rsplit('.', 1)[0]}_kerf_corregido.dxf",
+                        mime="application/dxf",
+                    )
+    else:
+        st.info("Sube al menos un archivo para comenzar.")
+
 
 # ------------------------------------------------------------------
 # Footer (footermenu con versión y copyright)
