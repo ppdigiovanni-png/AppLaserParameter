@@ -24,6 +24,9 @@ import os
 import tempfile
 from datetime import date
 
+import shutil
+import subprocess
+
 import cv2
 import ezdxf
 import ezdxf.path
@@ -32,6 +35,7 @@ import matplotlib.patches as patches
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import pdfplumber
 import streamlit as st
 import svgpathtools
 from shapely.geometry import Polygon as ShpPolygon
@@ -42,10 +46,52 @@ try:
 except ImportError:
     PDF_OK = False
 
+APP_VERSION = "v1.4.0"
+
 st.set_page_config(
     page_title="Remeciendo — Cotizador Láser PRO",
     page_icon="⚡",
     layout="wide",
+)
+
+# ------------------------------------------------------------------
+# CSS: sidebar a la derecha + más ancha
+# ------------------------------------------------------------------
+# Nota técnica: Streamlit no tiene una opción oficial para poner la barra
+# lateral a la derecha, así que esto se logra "engañando" al CSS interno
+# (data-testid) del framework. Si en el futuro Streamlit cambia su HTML
+# interno, este bloque puede dejar de verse bien — en ese caso, basta con
+# borrar este <style> completo para volver a la barra lateral normal (izquierda).
+st.markdown(
+    """
+    <style>
+    section[data-testid="stSidebar"] {
+        position: fixed;
+        top: 0;
+        right: 0;
+        left: auto !important;
+        height: 100vh;
+        width: 430px !important;
+    }
+    section[data-testid="stSidebar"] > div {
+        width: 430px !important;
+    }
+    div[data-testid="stAppViewContainer"] > div:first-child {
+        margin-right: 430px;
+        margin-left: 0 !important;
+    }
+    div[data-testid="collapsedControl"] {
+        left: auto !important;
+        right: 0.5rem !important;
+    }
+    @media (max-width: 900px) {
+        section[data-testid="stSidebar"] { width: 90vw !important; }
+        section[data-testid="stSidebar"] > div { width: 90vw !important; }
+        div[data-testid="stAppViewContainer"] > div:first-child { margin-right: 0; }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
 
 # ------------------------------------------------------------------
@@ -68,46 +114,46 @@ if "rates_df" not in st.session_state:
 # ------------------------------------------------------------------
 with st.sidebar:
     st.header("⚙️ Configuración del Taller")
+    st.caption("Cada sección es desplegable — ábrelas de a una, en el orden que prefieras.")
 
-    st.subheader("Tarifario de materiales")
-    st.caption("Puedes editar valores o agregar filas para nuevos materiales.")
-    rates_edit = st.data_editor(
-        st.session_state.rates_df,
-        num_rows="dynamic",
-        use_container_width=True,
-        key="rates_editor",
-    )
-    st.session_state.rates_df = rates_edit
-    material_sel = st.selectbox("Material de trabajo", rates_edit["Material"].tolist())
-    mat_row = rates_edit[rates_edit["Material"] == material_sel].iloc[0]
-    mat = {
-        "corte_mm": float(mat_row["corte_$/mm"]),
-        "grab_cm2": float(mat_row["grab_$/cm2"]),
-        "mat_m2": float(mat_row["mat_$/m2"]),
-        "vel": float(mat_row["vel_mm/s"]),
-    }
+    with st.expander("🧱 Tarifario de materiales", expanded=True):
+        st.caption("Puedes editar valores o agregar filas para nuevos materiales.")
+        rates_edit = st.data_editor(
+            st.session_state.rates_df,
+            num_rows="dynamic",
+            use_container_width=True,
+            key="rates_editor",
+        )
+        st.session_state.rates_df = rates_edit
+        material_sel = st.selectbox("Material de trabajo", rates_edit["Material"].tolist())
+        mat_row = rates_edit[rates_edit["Material"] == material_sel].iloc[0]
+        mat = {
+            "corte_mm": float(mat_row["corte_$/mm"]),
+            "grab_cm2": float(mat_row["grab_$/cm2"]),
+            "mat_m2": float(mat_row["mat_$/m2"]),
+            "vel": float(mat_row["vel_mm/s"]),
+        }
 
-    st.subheader("Costos operativos")
-    costo_minuto = st.number_input("Costo máquina ($/min)", value=350.0, step=25.0)
-    costo_alistamiento = st.number_input("Setup fijo ($)", value=1500.0, step=250.0)
-    margen_utilidad = st.slider("Margen de ganancia (%)", 0, 200, 40, step=5) / 100.0
-    merma_pct = st.slider("Merma / desperdicio de plancha (%)", 0, 50, 15, step=5) / 100.0
-    st.caption("La merma cubre recortes, bordes de sujeción y piezas de prueba.")
+    with st.expander("💵 Costos operativos y plancha", expanded=False):
+        costo_minuto = st.number_input("Costo máquina ($/min)", value=350.0, step=25.0)
+        costo_alistamiento = st.number_input("Setup fijo ($)", value=1500.0, step=250.0)
+        margen_utilidad = st.slider("Margen de ganancia (%)", 0, 200, 40, step=5) / 100.0
+        merma_pct = st.slider("Merma / desperdicio de plancha (%)", 0, 50, 15, step=5) / 100.0
+        st.caption("La merma cubre recortes, bordes de sujeción y piezas de prueba.")
 
-    st.subheader("Plancha de material (mm)")
-    plancha_w = st.number_input("Ancho de plancha (X)", value=1200, step=100)
-    plancha_h = st.number_input("Alto de plancha (Y)", value=900, step=100)
-    margen_pieza = st.number_input("Separación entre piezas (mm)", value=5, step=1)
-    permitir_rotar = st.checkbox("Permitir rotar piezas 90° para mejor encastre", value=True)
+        st.markdown("**Plancha de material (mm)**")
+        plancha_w = st.number_input("Ancho de plancha (X)", value=1200, step=100)
+        plancha_h = st.number_input("Alto de plancha (Y)", value=900, step=100)
+        margen_pieza = st.number_input("Separación entre piezas (mm)", value=5, step=1)
+        permitir_rotar = st.checkbox("Permitir rotar piezas 90° para mejor encastre", value=True)
 
-    st.subheader("Impuestos y condiciones comerciales")
-    aplicar_iva = st.checkbox("Agregar IVA (19%)", value=True)
-    descuento_pct = st.number_input("Descuento (%)", value=0.0, step=1.0, min_value=0.0, max_value=100.0) / 100.0
+    with st.expander("🧾 Impuestos y condiciones comerciales", expanded=False):
+        aplicar_iva = st.checkbox("Agregar IVA (19%)", value=True)
+        descuento_pct = st.number_input("Descuento (%)", value=0.0, step=1.0, min_value=0.0, max_value=100.0) / 100.0
 
-    st.divider()
-    st.subheader("Datos de la cotización")
-    cliente = st.text_input("Cliente", value="")
-    n_cotizacion = st.text_input("N° de cotización", value=f"REM-{date.today().strftime('%Y%m%d')}-01")
+    with st.expander("👤 Datos de la cotización", expanded=False):
+        cliente = st.text_input("Cliente", value="")
+        n_cotizacion = st.text_input("N° de cotización", value=f"REM-{date.today().strftime('%Y%m%d')}-01")
 
 
 # ------------------------------------------------------------------
@@ -188,6 +234,88 @@ def parse_svg(f_bytes):
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
+
+
+def parse_pdf(f_bytes, page_index=0):
+    """Devuelve (largo_corte_mm, ancho_mm, alto_mm) leyendo objetos vectoriales
+    (líneas, curvas y rectángulos) de un PDF con pdfplumber.
+    Los PDF miden en puntos (1 pt = 1/72 in): se convierte a mm asumiendo
+    que el diseño fue exportado a escala real 1:1 (lo normal en Illustrator/
+    CorelDRAW/Inkscape al exportar para corte láser)."""
+    PT_TO_MM = 25.4 / 72.0
+    with pdfplumber.open(io.BytesIO(f_bytes)) as pdf:
+        page = pdf.pages[page_index]
+        corte_pt = 0.0
+        xs, ys = [], []
+        for ln in page.lines:
+            corte_pt += math.dist((ln["x0"], ln["y0"]), (ln["x1"], ln["y1"]))
+            xs.extend([ln["x0"], ln["x1"]]); ys.extend([ln["y0"], ln["y1"]])
+        for rc in page.rects:
+            corte_pt += 2 * ((rc["x1"] - rc["x0"]) + (rc["y1"] - rc["y0"]))
+            xs.extend([rc["x0"], rc["x1"]]); ys.extend([rc["y0"], rc["y1"]])
+        for cv in page.curves:
+            pts = cv.get("pts", [])
+            for i in range(len(pts) - 1):
+                corte_pt += math.dist(pts[i], pts[i + 1])
+            xs.extend([p[0] for p in pts]); ys.extend([p[1] for p in pts])
+
+        if not xs:
+            return 650.0, 120.0, 80.0
+
+        corte_mm = corte_pt * PT_TO_MM
+        ancho_mm = (max(xs) - min(xs)) * PT_TO_MM
+        alto_mm = (max(ys) - min(ys)) * PT_TO_MM
+        return max(corte_mm, 1.0), max(ancho_mm, 1.0), max(alto_mm, 1.0)
+
+
+def parse_ai(f_bytes):
+    """Los .ai modernos (desde Illustrator CS en adelante) son, por dentro,
+    un PDF válido (compatibilidad PDF activada por defecto al guardar).
+    Se intenta leer como PDF; si el archivo es un .ai "legacy" sin ese
+    modo, se avisa y se usan valores estimados."""
+    try:
+        return parse_pdf(f_bytes)
+    except Exception as ex:
+        st.warning(
+            f"No se pudo leer este .ai como PDF ({ex}). Vuelve a guardarlo desde "
+            "Illustrator con 'Crear PDF compatible' activado, o expórtalo como "
+            "SVG/DXF/PDF. Se usan valores estimados."
+        )
+        return 650.0, 120.0, 80.0
+
+
+def parse_eps(f_bytes):
+    """El formato EPS (PostScript) no tiene una librería pura de Python
+    confiable para extraer vectores. Si el servidor tiene Ghostscript
+    instalado (binario 'gs'), se convierte a PDF internamente y se reutiliza
+    el parser de PDF; si no, se avisa y se usan valores estimados."""
+    gs_bin = shutil.which("gs") or shutil.which("gswin64c")
+    if not gs_bin:
+        st.warning(
+            "Este servidor no tiene Ghostscript instalado, así que no se puede "
+            "leer el EPS con precisión. Se usan valores estimados — para mayor "
+            "exactitud, exporta el diseño como PDF, SVG o DXF."
+        )
+        return 650.0, 120.0, 80.0
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".eps") as tmp_in:
+        tmp_in.write(f_bytes)
+        in_path = tmp_in.name
+    out_path = in_path.replace(".eps", ".pdf")
+    try:
+        subprocess.run(
+            [gs_bin, "-q", "-dNOPAUSE", "-dBATCH", "-sDEVICE=pdfwrite", f"-sOutputFile={out_path}", in_path],
+            check=True, timeout=30,
+        )
+        with open(out_path, "rb") as f:
+            return parse_pdf(f.read())
+    except Exception as ex:
+        st.warning(f"No se pudo convertir el EPS con Ghostscript ({ex}). Se usan valores estimados.")
+        return 650.0, 120.0, 80.0
+    finally:
+        for p in (in_path, out_path):
+            if os.path.exists(p):
+                os.remove(p)
 
 
 def parse_raster(f_bytes, ancho_real_mm):
@@ -391,18 +519,35 @@ def exportar_dxf_corregido(resultado):
     return buf.getvalue().encode("utf-8")
 
 
-st.title("⚡ Remeciendo — Cotizador y Nesting Láser")
-st.write("Sube uno o varios archivos (DXF, SVG, PNG, JPG) para cotizar y optimizar el uso de material.")
+# ------------------------------------------------------------------
+# Encabezado centrado (menubar superior con la marca)
+# ------------------------------------------------------------------
+st.markdown(
+    f"""
+    <div style="text-align:center; padding-top: 0.5rem;">
+        <span style="font-size: 2.4rem;">⚡</span>
+        <h1 style="display:inline; margin-left: 0.4rem;">Remeciendo</h1>
+        <p style="color: #888; margin-top: 0.2rem;">Cotizador y Nesting Láser · Estudio &amp; Taller Laser</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+st.write(
+    "Sube uno o varios archivos (DXF, SVG, PDF, AI, EPS, PNG, JPG) para cotizar y optimizar el uso de material."
+)
 
 archivos = st.file_uploader(
-    "Carga tus diseños", accept_multiple_files=True, type=["dxf", "svg", "png", "jpg", "jpeg"]
+    "Carga tus diseños",
+    accept_multiple_files=True,
+    type=["dxf", "svg", "pdf", "ai", "eps", "png", "jpg", "jpeg"],
 )
 
 if archivos:
     st.subheader("Cantidad y tamaño real de cada diseño")
     st.caption(
         "Para PNG/JPG indica el ancho real en mm de la pieza terminada "
-        "(los píxeles no tienen escala propia); para DXF/SVG se detecta solo."
+        "(los píxeles no tienen escala propia); para DXF/SVG/PDF/AI se detecta solo "
+        "(EPS necesita Ghostscript en el servidor; si no está, se estima)."
     )
 
     piezas_meta = []
@@ -431,6 +576,12 @@ if archivos:
             c, w, h = parse_dxf(bytes_data)
         elif name.endswith(".svg"):
             c, w, h = parse_svg(bytes_data)
+        elif name.endswith(".pdf"):
+            c, w, h = parse_pdf(bytes_data)
+        elif name.endswith(".ai"):
+            c, w, h = parse_ai(bytes_data)
+        elif name.endswith(".eps"):
+            c, w, h = parse_eps(bytes_data)
         else:
             c, w, h = parse_raster(bytes_data, meta["ancho_real"])
 
@@ -712,3 +863,17 @@ if archivos:
                 )
 else:
     st.info("Sube al menos un archivo para comenzar.")
+
+# ------------------------------------------------------------------
+# Footer (footermenu con versión y copyright)
+# ------------------------------------------------------------------
+st.markdown(
+    f"""
+    <hr style="margin-top: 3rem; opacity: 0.2;">
+    <div style="text-align:center; color:#999; font-size:0.85rem; padding-bottom: 1rem;">
+        Remeciendo Estudio &amp; Taller Laser · {APP_VERSION}<br>
+        © {date.today().year} Remeciendo — Todos los derechos reservados.
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
