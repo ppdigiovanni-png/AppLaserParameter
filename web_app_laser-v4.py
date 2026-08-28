@@ -632,6 +632,33 @@ def exportar_dxf_corregido(resultado):
 
 with col_main:
     # ------------------------------------------------------------------
+    # CSS responsivo liviano: reduce tamaños en pantallas angostas y deja
+    # que la fila de pestañas se pueda deslizar con el dedo si no caben
+    # todas, en vez de cortarse. (Esto NO fija posiciones ni pelea con el
+    # layout interno de Streamlit como el truco de la sidebar que
+    # abandonamos — solo ajusta tipografía y overflow, así que es seguro.)
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stTabs"] div[role="tablist"] {
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+            flex-wrap: nowrap;
+        }
+        div[data-testid="stTabs"] button[role="tab"] {
+            white-space: nowrap;
+        }
+        @media (max-width: 640px) {
+            h1 { font-size: 1.6rem !important; }
+            div[data-testid="stMetricValue"] { font-size: 1.1rem !important; }
+            div[data-testid="stMetricLabel"] { font-size: 0.75rem !important; }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # ------------------------------------------------------------------
     # Encabezado centrado (menubar superior con la marca)
     # ------------------------------------------------------------------
     st.markdown(
@@ -733,11 +760,11 @@ with col_main:
 
         tab1, tab2, tab3, tab4, tab5 = st.tabs(
             [
-                "💰 1. Cotización",
-                "🧩 2. Optimizador de Encastre (Nesting)",
-                "📄 3. Exportar Cotización",
-                "🔧 4. Corrector de Kerf (uniones/aletas)",
-                "📐 5. Corrector de Ranuras (snap-fit)",
+                "💰 Cotización",
+                "🧩 Nesting",
+                "📄 Exportar",
+                "🔧 Kerf",
+                "📐 Ranuras",
             ]
         )
 
