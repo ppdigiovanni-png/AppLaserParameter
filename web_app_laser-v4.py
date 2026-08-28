@@ -273,7 +273,7 @@ def parse_eps(f_bytes):
     try:
         subprocess.run(
             [gs_bin, "-q", "-dNOPAUSE", "-dBATCH", "-sDEVICE=pdfwrite", f"-sOutputFile={out_path}", in_path],
-            check=True, timeout=30,
+            check=True, timeout=60,
         )
         with open(out_path, "rb") as f:
             return parse_pdf(f.read())
@@ -427,6 +427,77 @@ def _closed_polys_from_svg(f_bytes, n_samples=200):
     return polys
 
 
+def _closed_polys_from_pdf(f_bytes, page_index=0):
+    """Extrae contornos cerrados de un PDF (o de un .ai/.eps ya convertidos
+    a PDF) como polígonos shapely, usando los objetos vectoriales reales
+    ('rect' y 'curve' cerrados) que entrega pdfplumber."""
+    polys = []
+    try:
+        with pdfplumber.open(io.BytesIO(f_bytes)) as pdf:
+            page = pdf.pages[page_index]
+            for rc in page.rects:
+                pts = rc.get("pts", [])
+                if len(pts) >= 3:
+                    poly = ShpPolygon(pts)
+                    if poly.is_valid and poly.area > 1e-6:
+                        polys.append(poly)
+            for cv in page.curves:
+                pts = cv.get("pts", [])
+                path_ops = cv.get("path", [])
+                cerrado = (path_ops and path_ops[-1][0] == "h") or (
+                    len(pts) >= 3 and math.dist(pts[0], pts[-1]) < 1e-3
+                )
+                if cerrado and len(pts) >= 3:
+                    poly = ShpPolygon(pts)
+                    if poly.is_valid and poly.area > 1e-6:
+                        polys.append(poly)
+    except Exception as ex:
+        st.warning(f"No se pudo leer geometría cerrada del PDF ({ex}).")
+    return polys
+
+
+def _closed_polys_from_ai_or_eps(f_bytes, filename):
+    """.ai moderno = PDF por dentro; .eps se convierte primero a PDF con
+    Ghostscript si está disponible. Devuelve lista de polígonos cerrados."""
+    name = filename.lower()
+    if name.endswith(".ai"):
+        try:
+            return _closed_polys_from_pdf(f_bytes)
+        except Exception:
+            st.warning(
+                "No se pudo leer este .ai como PDF para el corrector de kerf "
+                "(puede ser un .ai antiguo sin compatibilidad PDF)."
+            )
+            return []
+    if name.endswith(".eps"):
+        gs_bin = shutil.which("gs") or shutil.which("gswin64c")
+        if not gs_bin:
+            st.warning(
+                "Este EPS necesita Ghostscript en el servidor para usarse en el "
+                "corrector de kerf (agrega `ghostscript` a packages.txt)."
+            )
+            return []
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".eps") as tmp_in:
+            tmp_in.write(f_bytes)
+            in_path = tmp_in.name
+        out_path = in_path.replace(".eps", ".pdf")
+        try:
+            subprocess.run(
+                [gs_bin, "-q", "-dNOPAUSE", "-dBATCH", "-sDEVICE=pdfwrite", f"-sOutputFile={out_path}", in_path],
+                check=True, timeout=60,
+            )
+            with open(out_path, "rb") as f:
+                return _closed_polys_from_pdf(f.read())
+        except Exception as ex:
+            st.warning(f"No se pudo convertir el EPS con Ghostscript ({ex}).")
+            return []
+        finally:
+            for p in (in_path, out_path):
+                if os.path.exists(p):
+                    os.remove(p)
+    return []
+
+
 def clasificar_y_compensar(polys, kerf_mm, modo):
     """Clasifica cada contorno como 'exterior' o 'agujero' según cuántos otros
     contornos lo contienen (regla par/impar), y le aplica el offset de kerf
@@ -559,6 +630,35 @@ with col_main:
                 area_total_cm2 += (w * h) / 100.0
                 piezas.append({"nombre": f"{arch.name}#{i+1}", "w": w, "h": h, "corte": c})
 
+        # ---- Nesting y costos: se calculan ANTES de las pestañas para poder
+        # mostrar un panel de indicadores (estilo dashboard) siempre visible,
+        # sin importar en qué pestaña esté el usuario ----
+        placed_by_sheet, sin_ubicar = nest_pieces(piezas, plancha_w, plancha_h, margen_pieza, permitir_rotar)
+        n_planchas = len(placed_by_sheet)
+        area_planchas_cm2 = n_planchas * (plancha_w * plancha_h) / 100.0
+        area_piezas_cm2 = area_total_cm2
+        utilizacion_pct = (area_piezas_cm2 / area_planchas_cm2 * 100.0) if area_planchas_cm2 > 0 else 0.0
+
+        tiempo_maq_min = (corte_total / mat["vel"]) / 60.0
+        # Costo de material: sobre planchas REALMENTE necesarias (con merma), no sobre el área de piezas.
+        costo_mat = n_planchas * (plancha_w * plancha_h / 10000.0) * mat["mat_m2"] * (1 + merma_pct)
+        costo_maq = tiempo_maq_min * costo_minuto
+        costo_desgaste = corte_total * mat["corte_mm"]
+        costo_neto = costo_mat + costo_maq + costo_desgaste + costo_alistamiento
+        precio_con_utilidad = costo_neto * (1 + margen_utilidad)
+        descuento_monto = precio_con_utilidad * descuento_pct
+        subtotal = precio_con_utilidad - descuento_monto
+        iva_monto = subtotal * 0.19 if aplicar_iva else 0.0
+        total_final = subtotal + iva_monto
+
+        # ---- Panel de indicadores (dashboard) — siempre visible ----
+        kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+        kpi1.metric("Largo de corte total", f"{corte_total:,.0f} mm")
+        kpi2.metric("Planchas necesarias", f"{n_planchas}")
+        kpi3.metric("Utilización de plancha", f"{utilizacion_pct:.0f}%")
+        kpi4.metric("VALOR TOTAL A COBRAR", f"${total_final:,.0f}")
+        st.divider()
+
         tab1, tab2, tab3, tab4 = st.tabs(
             [
                 "💰 1. Cotización",
@@ -568,33 +668,8 @@ with col_main:
             ]
         )
 
-        # ---- Nesting (se calcula primero porque la cotización depende del N° de planchas) ----
-        placed_by_sheet, sin_ubicar = nest_pieces(piezas, plancha_w, plancha_h, margen_pieza, permitir_rotar)
-        n_planchas = len(placed_by_sheet)
-        area_planchas_cm2 = n_planchas * (plancha_w * plancha_h) / 100.0
-        area_piezas_cm2 = area_total_cm2
-        utilizacion_pct = (area_piezas_cm2 / area_planchas_cm2 * 100.0) if area_planchas_cm2 > 0 else 0.0
-
         with tab1:
             st.subheader("Resumen de costos del lote")
-
-            tiempo_maq_min = (corte_total / mat["vel"]) / 60.0
-            # Costo de material: sobre planchas REALMENTE necesarias (con merma), no sobre el área de piezas.
-            costo_mat = n_planchas * (plancha_w * plancha_h / 10000.0) * mat["mat_m2"] * (1 + merma_pct)
-            costo_maq = tiempo_maq_min * costo_minuto
-            costo_desgaste = corte_total * mat["corte_mm"]
-            costo_neto = costo_mat + costo_maq + costo_desgaste + costo_alistamiento
-            precio_con_utilidad = costo_neto * (1 + margen_utilidad)
-            descuento_monto = precio_con_utilidad * descuento_pct
-            subtotal = precio_con_utilidad - descuento_monto
-            iva_monto = subtotal * 0.19 if aplicar_iva else 0.0
-            total_final = subtotal + iva_monto
-
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Largo de corte total", f"{corte_total:,.0f} mm")
-            col2.metric("Tiempo de máquina", f"{tiempo_maq_min:.1f} min")
-            col3.metric("Planchas necesarias", f"{n_planchas}")
-            col4.metric("VALOR TOTAL A COBRAR", f"${total_final:,.0f}")
 
             if sin_ubicar:
                 st.error(
@@ -729,12 +804,15 @@ with col_main:
                 "kerf/2 para que la pieza cortada quede en la medida que diseñaste."
             )
 
-            archivos_vectoriales = [a for a in archivos if a.name.lower().endswith((".dxf", ".svg"))]
+            archivos_vectoriales = [
+                a for a in archivos if a.name.lower().endswith((".dxf", ".svg", ".pdf", ".ai", ".eps"))
+            ]
 
             if not archivos_vectoriales:
                 st.info(
-                    "El corrector de kerf trabaja sobre geometría vectorial cerrada (DXF o SVG). "
-                    "Los PNG/JPG no traen esa información, así que no aplican aquí."
+                    "El corrector de kerf trabaja sobre geometría vectorial cerrada "
+                    "(DXF, SVG, PDF, AI o EPS). Los PNG/JPG no traen esa información, "
+                    "así que no aplican aquí."
                 )
             else:
                 col_a, col_b, col_c = st.columns(3)
@@ -761,10 +839,15 @@ with col_main:
 
                 arch_obj = next(a for a in archivos_vectoriales if a.name == archivo_kerf)
                 bytes_data = arch_obj.getvalue()
-                if archivo_kerf.lower().endswith(".dxf"):
+                name_lower = archivo_kerf.lower()
+                if name_lower.endswith(".dxf"):
                     polys_originales = _closed_polys_from_dxf(bytes_data)
-                else:
+                elif name_lower.endswith(".svg"):
                     polys_originales = _closed_polys_from_svg(bytes_data)
+                elif name_lower.endswith(".pdf"):
+                    polys_originales = _closed_polys_from_pdf(bytes_data)
+                else:  # .ai / .eps
+                    polys_originales = _closed_polys_from_ai_or_eps(bytes_data, archivo_kerf)
 
                 if not polys_originales:
                     st.warning(
